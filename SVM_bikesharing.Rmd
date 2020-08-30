@@ -1,0 +1,167 @@
+---
+title: "SVM Bikes"
+author: "Charles Gallagher"
+date: "8/30/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# load packages 
+library(tidyverse)
+library(tidymodels)
+
+
+## Data Cleaning 
+BikeData <- read_csv("https://faculty.nps.edu/rbassett/Data/BikeData_Train.csv") # makes the correct datetime conversion
+#names(BikeData)
+#Make factors for these variables correct data 
+cats <- c("season", "yr","mnth" ,"holiday","weekday" ,"workingday", "weathersit") # make these factors everything else should be good one date the rest numeric 
+BikeData[cats] <-map(BikeData[cats], factor) #apply to dataframe
+map_chr(BikeData, class)# check 
+
+#BikeData<-data.frame(BikeData) # make not a tibble odd things happen with RMSE function 
+glimpse(BikeData)
+
+
+```
+
+
+# Split Data
+
+```{r}
+
+# Split the data set training and test 
+set.seed(123)
+split <- initial_split(BikeData, strata = cnt)
+train <- training(split)
+test <- testing(split)
+
+```
+
+# Preprocess Data
+
+```{r}
+rec <- recipe(cnt~., data = train) %>% 
+  update_role(instant, new_role = "ID") %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_rm(dteday,casual, registered, atemp) %>% 
+  step_poly(temp, degree = 2)
+
+rec_prep<-  prep(rec)
+
+juiced <- juice(rec_prep)
+
+```
+
+
+# Build Model 
+```{r}
+tune_spec <- svm_poly(
+  cost = tune(),
+  degree = tune(),
+  scale_factor = tune()
+) %>%
+  set_mode("regression") %>%
+  set_engine("kernlab")
+
+tune_wf <- workflow() %>%
+  add_recipe(rec_prep) %>%
+  add_model(tune_spec)
+
+```
+
+
+# Tune 
+
+```{r}
+set.seed(234)
+folds <- vfold_cv(train)
+
+
+doParallel::registerDoParallel()
+set.seed(345)
+tune_res <- tune_grid(
+  tune_wf,
+  resamples = folds,
+  grid = 20
+)
+
+tune_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == "rmse") %>% 
+  select(mean, cost, scale_factor,degree) %>% 
+  pivot_longer(cost:degree,
+               values_to = "value",
+               names_to = "parameter") %>% 
+  ggplot(aes(value, mean,color = parameter))+
+  geom_point(show.legend = F)+
+  geom_line(show.legend = F)+
+  facet_wrap(~parameter, scales = "free_x")+
+  labs(x = NULL, y = "RMSE")
+
+tune_res %>% collect_metrics()
+
+```
+
+```{bash engine.opts='-l', echo = F, warning =F, message = F}
+
+stack_nolhs.rb -s 3 -l 512 svm_parameters.txt  > svm_tune_grid.csv
+
+```
+
+
+```{r}
+grid <- read_delim("svm_tune_grid.csv", 
+    "\t", escape_double = FALSE, col_names = c("cost","degree","scale_factor"), 
+    trim_ws = TRUE)
+
+doParallel::registerDoParallel()
+
+set.seed(456)
+regular_res <- tune_grid(
+  tune_wf,
+  resamples = folds,
+  grid = grid
+)
+
+
+#saveRDS(regular_res,"svm_tune_output.rds")
+#readRDS("svm_tune_output.rds")
+
+regular_res %>% collect_metrics() %>% 
+  filter(.metric=="rmse") %>% 
+  arrange(mean)
+
+
+```
+
+```{r}
+best_rmse <- select_best(regular_res, "rmse")
+
+final_svm <- finalize_model(
+  tune_spec,
+  best_rmse
+)
+
+final_svm
+```
+
+
+# Use Test Data 
+
+```{r}
+final_svm <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(final_svm)
+
+final_res <- final_svm %>%
+  last_fit(split)
+
+final_res %>%
+  collect_metrics()
+```
+

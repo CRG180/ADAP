@@ -1,0 +1,144 @@
+---
+title: "Ridge Regression Bike Sharining"
+author: "Charles Gallagher"
+date: "8/30/2020"
+output: html_document
+---
+
+---
+title: "ridge Bike Sharining "
+author: "Charles Gallagher"
+date: "8/30/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Clean Data 
+
+```{r}
+# load packages 
+library(tidyverse)
+library(tidymodels)
+library(glmnet)
+
+## Data Cleaning 
+BikeData <- read_csv("https://faculty.nps.edu/rbassett/Data/BikeData_Train.csv") # makes the correct datetime conversion
+#names(BikeData)
+#Make factors for these variables correct data 
+cats <- c("season", "yr","mnth" ,"holiday","weekday" ,"workingday", "weathersit") # make these factors everything else should be good one date the rest numeric 
+BikeData[cats] <-map(BikeData[cats], factor) #apply to dataframe
+map_chr(BikeData, class)# check 
+
+#BikeData<-data.frame(BikeData) # make not a tibble odd things happen with RMSE function 
+glimpse(BikeData)
+
+
+```
+
+
+
+# Split Data
+
+```{r}
+
+# Split the data set training and test 
+set.seed(123)
+split <- initial_split(BikeData, strata = cnt)
+train <- training(split)
+test <- testing(split)
+
+```
+
+# Preprocess Data
+
+```{r}
+rec <- recipe(cnt~., data = train) %>% 
+  update_role(instant, new_role = "ID") %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  step_rm(dteday,casual, registered, atemp) %>% 
+  #step_normalize(all_numeric(), - all_outcomes()) %>%
+
+  step_poly(temp,hum,windspeed, degree = 2) %>% 
+  step_interact(term = ~temp_poly_1:hum_poly_1) 
+
+rec_prep<-  prep(rec)
+
+juiced <- juice(rec_prep)
+
+```
+
+# Build Model 
+
+```{r}
+val_set <-  bootstraps(train,strata = cnt)
+
+
+
+tune_spec <-linear_reg(penalty = tune(), mixture = 0) %>%
+  set_engine("glmnet")  
+ 
+
+wf <- workflow() %>% add_recipe(rec) %>% add_model(tune_spec)
+
+lambda_grid <- grid_regular(penalty(range = c(.0001, 1)), levels = 50)
+
+doParallel::registerDoParallel()
+
+set.seed(1233)
+ridge_grid <- tune_grid(
+  wf,
+  resamples = val_set,
+  grid = lambda_grid
+)
+
+
+ridge_grid %>% collect_metrics() %>% 
+  filter(.metric == "rmse") %>% 
+  ggplot(aes(penalty, mean))+
+  geom_point()+
+  geom_line()
+
+best_rmse <-ridge_grid %>% select_best("rmse")
+
+ridge_grid %>% collect_metrics() %>% 
+  filter(.config==as.character(best_rmse[,2]))
+
+lowest_rmse <- ridge_grid %>%
+  select_best("rmse", maximize = FALSE)
+
+final_ridge <- finalize_workflow(
+  wf ,
+  lowest_rmse
+)
+
+
+```
+
+
+```{r}
+library(vip)
+
+final_ridge %>%
+  fit(train) %>%
+  pull_workflow_fit() %>%
+  vi(lambda = lowest_rmse$penalty) %>%
+  mutate(
+    Importance = abs(Importance),
+    Variable = fct_reorder(Variable, Importance)
+  ) %>%
+  ggplot(aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(y = NULL)
+```
+
+```{r}
+last_fit(
+  final_ridge,
+  split
+) %>%
+  collect_metrics()
+```

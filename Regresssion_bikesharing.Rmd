@@ -1,0 +1,104 @@
+---
+title: " Regression Bike Sharining"
+author: "Charles Gallagher"
+date: "8/30/2020"
+output: html_document
+---
+
+---
+title: "ridge Bike Sharining "
+author: "Charles Gallagher"
+date: "8/30/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Clean Data 
+
+```{r}
+# load packages 
+library(tidyverse)
+library(tidymodels)
+library(NPSOR) # my package on Github that I built devtools::install_github("CRG180/NPSOR")
+
+## Data Cleaning 
+BikeData <- read_csv("https://faculty.nps.edu/rbassett/Data/BikeData_Train.csv") # makes the correct datetime conversion
+#names(BikeData)
+#Make factors for these variables correct data 
+cats <- c("season", "yr","mnth" ,"holiday","weekday" ,"workingday", "weathersit") # make these factors everything else should be good one date the rest numeric 
+BikeData[cats] <-map(BikeData[cats], factor) #apply to dataframe
+map_chr(BikeData, class)# check 
+
+#BikeData<-data.frame(BikeData) # make not a tibble odd things happen with RMSE function 
+glimpse(BikeData)
+
+
+```
+
+
+
+
+# Preprocess Data
+
+```{r}
+rec <- recipe(cnt~., data = BikeData) %>% 
+  update_role(instant, new_role = "ID") %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  step_rm(dteday,casual, registered, atemp) %>% 
+  #step_normalize(all_numeric(), - all_outcomes()) %>%
+  step_poly(temp,hum,windspeed, degree = 2) %>% 
+  step_interact(term = ~temp_poly_1:hum_poly_1) 
+
+rec_prep<-  prep(rec)
+
+
+juiced <- juice(rec_prep)
+
+
+# Split the data set training and test 
+set.seed(123)
+split <- initial_split(juiced, strata = cnt)
+train <- training(split)
+test <- testing(split)
+
+
+
+```
+
+# Build Model / Train Model 
+
+```{r}
+
+
+model_spec <-linear_reg() %>%
+  set_mode("regression") %>% 
+  set_engine("lm")  
+ 
+
+wf <- workflow() %>% add_recipe(rec) %>% add_model(tune_spec)
+
+train_fit <- fit(model_spec,cnt~., data = train)
+train_fit$fit
+glance(train_fit$fit)
+NPSOR::RMSE(train_fit$fit)
+
+
+```
+
+# Test Model on Test Data 
+
+```{r}
+
+train_fit <- fit(model_spec,cnt~., data = test)
+train_fit$fit
+glance(train_fit$fit)
+NPSOR::RMSE(train_fit$fit)
+
+```
+
+
+
+

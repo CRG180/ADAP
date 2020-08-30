@@ -1,0 +1,170 @@
+---
+title: "Random_Forest"
+author: "Charles Gallagher"
+date: "8/29/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Clean Data 
+
+```{r}
+# load packages 
+library(tidyverse)
+library(tidymodels)
+
+
+## Data Cleaning 
+BikeData <- read_csv("https://faculty.nps.edu/rbassett/Data/BikeData_Train.csv") # makes the correct datetime conversion
+#names(BikeData)
+#Make factors for these variables correct data 
+cats <- c("season", "yr","mnth" ,"holiday","weekday" ,"workingday", "weathersit") # make these factors everything else should be good one date the rest numeric 
+BikeData[cats] <-map(BikeData[cats], factor) #apply to dataframe
+map_chr(BikeData, class)# check 
+
+#BikeData<-data.frame(BikeData) # make not a tibble odd things happen with RMSE function 
+glimpse(BikeData)
+
+
+```
+# Split Data
+
+```{r}
+
+# Split the data set training and test 
+set.seed(123)
+split <- initial_split(BikeData, strata = cnt)
+train <- training(split)
+test <- testing(split)
+
+```
+
+# Preprocess Data
+
+```{r}
+rec <- recipe(cnt~., data = train) %>% 
+  update_role(instant, new_role = "ID") %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_rm(dteday,casual, registered, atemp) %>% 
+  step_poly(temp, degree = 2)
+
+rec_prep<-  prep(rec)
+
+juiced <- juice(rec_prep)
+
+```
+
+# Build Model 
+```{r}
+tune_spec <- rand_forest(
+  mtry = tune(),
+  trees = 200,
+  min_n = tune()
+) %>%
+  set_mode("regression") %>%
+  set_engine("ranger")
+
+tune_wf <- workflow() %>%
+  add_recipe(rec_prep) %>%
+  add_model(tune_spec)
+
+```
+
+
+# Tune 
+
+```{r}
+set.seed(234)
+folds <- vfold_cv(train)
+
+
+doParallel::registerDoParallel()
+set.seed(345)
+tune_res <- tune_grid(
+  tune_wf,
+  resamples = folds,
+  grid = 20
+)
+
+tune_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == "rmse") %>% 
+  select(mean, min_n, mtry) %>% 
+  pivot_longer(min_n:mtry,
+               values_to = "value",
+               names_to = "parameter") %>% 
+  ggplot(aes(value, mean,color = parameter))+
+  geom_point(show.legend = F)+
+  geom_line(show.legend = F)+
+  facet_wrap(~parameter, scales = "free_x")+
+  labs(x = NULL, y = "RMSE")
+
+
+
+```
+
+
+```{r}
+grid <- grid_regular(
+  mtry(range = c(0, 30)),
+  min_n(range = c(3, 12)),
+  levels = 10
+)
+
+
+set.seed(456)
+regular_res <- tune_grid(
+  tune_wf,
+  resamples = folds,
+  grid = grid
+)
+
+regular_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == "rmse") %>% 
+  mutate(min_n = factor(min_n)) %>%
+  ggplot(aes(mtry, mean, color = min_n)) +
+  geom_line(alpha = 0.5, size = 1.5) +
+  geom_point() +
+  labs(y = "RMSE")
+
+
+```
+```{r}
+best_rmse <- select_best(regular_res, "rmse")
+
+final_rf <- finalize_model(
+  tune_spec,
+  best_rmse
+)
+
+final_rf
+```
+
+```{r}
+library(vip)
+final_rf %>%
+  set_engine("ranger", importance = "permutation") %>%
+  fit(cnt ~ .,
+    data = juice(rec_prep) %>% select(-instant)
+  ) %>%
+  vip(geom = "point")
+```
+# Use Test Data 
+
+```{r}
+final_wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(final_rf)
+
+final_res <- final_wf %>%
+  last_fit(split)
+
+final_res %>%
+  collect_metrics()
+```
+
+

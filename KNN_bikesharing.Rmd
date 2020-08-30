@@ -1,0 +1,130 @@
+---
+title: "KNN Bike sharing"
+author: "Charles Gallagher"
+date: "8/30/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Clean Data 
+
+```{r}
+# load packages 
+library(tidyverse)
+library(tidymodels)
+
+
+## Data Cleaning 
+BikeData <- read_csv("https://faculty.nps.edu/rbassett/Data/BikeData_Train.csv") # makes the correct datetime conversion
+#names(BikeData)
+#Make factors for these variables correct data 
+cats <- c("season", "yr","mnth" ,"holiday","weekday" ,"workingday", "weathersit") # make these factors everything else should be good one date the rest numeric 
+BikeData[cats] <-map(BikeData[cats], factor) #apply to dataframe
+map_chr(BikeData, class)# check 
+
+#BikeData<-data.frame(BikeData) # make not a tibble odd things happen with RMSE function 
+glimpse(BikeData)
+
+
+```
+
+
+# Split Data
+
+```{r}
+
+# Split the data set training and test 
+set.seed(123)
+split <- initial_split(BikeData, strata = cnt)
+train <- training(split)
+test <- testing(split)
+
+```
+
+# Preprocess Data
+
+```{r}
+rec <- recipe(cnt~., data = train) %>% 
+  update_role(instant, new_role = "ID") %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  step_rm(dteday,casual, registered, atemp) %>% 
+  #step_normalize(all_numeric(), - all_outcomes()) %>%
+  step_poly(temp,hum,windspeed, degree = 2) %>% 
+  step_interact(term = ~temp_poly_1:hum_poly_1) 
+
+rec_prep<-  prep(rec)
+
+juiced <- juice(rec_prep)
+
+```
+
+
+
+# Build Model
+
+```{r}
+tune_spec <- nearest_neighbor(neighbors = tune("K")) %>%
+  set_engine("kknn") %>%
+  set_mode("regression") %>% 
+  translate()
+  
+tune_wf <- workflow() %>%
+  add_recipe(rec_prep) %>%
+  add_model(tune_spec)
+
+```
+
+# Tune 
+
+```{r}
+set.seed(234)
+folds <- vfold_cv(train)
+grid_tb <- tibble(K = c(1:150))
+
+doParallel::registerDoParallel()
+set.seed(345)
+tune_res <- tune_grid(
+  tune_wf,
+  resamples = folds,
+  grid = grid_tb
+)
+
+tune_res %>% 
+  collect_metrics() %>% 
+  filter(.metric == "rmse") %>% 
+  ggplot(aes(K, mean, color = .metric)) +
+  geom_line(size = 1.5) +
+  facet_wrap(~.metric, scales = "free", nrow = 2) +
+  theme(legend.position = "none")+
+  labs(title = "Finding the Best K for KNN on Bike Sharining Data")
+
+```
+
+```{r}
+best_rmse <- select_best(tune_res, "rmse")
+
+final_knn <- finalize_model(
+  tune_spec,
+  best_rmse
+)
+
+final_knn
+```
+# Use Test Data 
+
+```{r}
+final_wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(final_knn)
+```
+
+
+```{r}
+final_res <- final_wf %>%
+  last_fit(split)
+
+final_res %>%
+  collect_metrics()
+```
